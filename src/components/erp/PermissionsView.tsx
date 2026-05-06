@@ -28,25 +28,53 @@ const actionColumns: Record<PermissionAction, string> = {
   Export: 'can_export',
 }
 
-const modules = [
-  { key: 'project-structure', label: 'Project Structure', desc: 'Project hierarchy and areas' },
+export const PERMISSION_MODULES = [
+  { key: 'home', label: 'Home', desc: 'Main ERP landing dashboard' },
+  { key: 'approval-center', label: 'Assigned Approvals', desc: 'Assigned approval inbox' },
+  { key: 'workflow', label: 'Workflow', desc: 'Workflow status and actions' },
+  { key: 'dashboard', label: 'Dashboard', desc: 'Project dashboard and KPIs' },
+  { key: 'projects', label: 'Projects', desc: 'Project master data' },
+  { key: 'structure', label: 'Project Structure', desc: 'Project hierarchy and areas' },
   { key: 'boq', label: 'BOQ', desc: 'Bill of Quantities' },
   { key: 'bbs-qs', label: 'BBS & QS', desc: 'Quantity control' },
+  { key: 'subcontractors', label: 'Subcontractors', desc: 'Subcontractor master and project scope' },
   { key: 'subcontractor-dashboard', label: 'Subcontractor Dashboard', desc: 'Contractor progress comparison' },
   { key: 'workfronts', label: 'Workfronts', desc: 'Grouped schedule and site workfront tracking' },
   { key: 'site-progress', label: 'Site Progress', desc: 'Physical progress entry and approval' },
-  { key: 'subcontractor-contracts', label: 'Subcontractor Contracts', desc: 'Contract terms and items' },
-  { key: 'subcontractor-invoices', label: 'Subcontractor Invoices', desc: 'Certificates and payments' },
-  { key: 'material-requests', label: 'Material Requests', desc: 'Site material requests' },
+  { key: 'breakdown', label: 'Subcontractor Contracts', desc: 'Contract terms and items' },
+  { key: 'certificates', label: 'Subcontractor Invoices', desc: 'Certificates and payments' },
+  { key: 'client-invoices', label: 'Client Invoices', desc: 'Client billing and certificates' },
+  { key: 'technical', label: 'Technical Office', desc: 'Technical office logs' },
   { key: 'procurement', label: 'Procurement', desc: 'PR / RFQ / PO workflow' },
+  { key: 'rfqs', label: 'RFQs', desc: 'RFQ list and entry' },
   { key: 'supplier-offers', label: 'Supplier Offers', desc: 'Supplier quotation offer list' },
+  { key: 'procurement-quotations', label: 'Procurement Quotations', desc: 'RFQ quotation workflow' },
   { key: 'quotation-comparison', label: 'Quotation Comparison', desc: 'RFQ offer comparison and award selection' },
+  { key: 'inventory', label: 'Inventory / Stores', desc: 'Stores, stock, GRNs, and issues' },
+  { key: 'villas', label: 'Villa Tracker', desc: 'Villa status tracking' },
   { key: 'finance', label: 'Finance', desc: 'Payments and accounts' },
-  { key: 'assigned-approvals', label: 'Assigned Approvals', desc: 'Workflow actions' },
+  { key: 'payment-requests', label: 'Payment Requests', desc: 'Payment request tracking' },
+  { key: 'commercial', label: 'Commercial', desc: 'Commercial claims and cost control' },
+  { key: 'tendering', label: 'Tendering & Cost', desc: 'Tender and cost management' },
+  { key: 'variations', label: 'Variations', desc: 'Variation requests and approvals' },
+  { key: 'schedule', label: 'P6 Schedule', desc: 'Schedule activity mapping' },
   { key: 'reports', label: 'Reports', desc: 'Dashboards and exports' },
   { key: 'company-branding', label: 'Company Branding', desc: 'Logo and profile' },
   { key: 'permissions', label: 'Settings / Permissions', desc: 'Access control' },
+  { key: 'approval-matrix', label: 'Approval Matrix', desc: 'Approval matrix rules' },
+  { key: 'approvals', label: 'QS Approvals', desc: 'QS approval screens' },
 ]
+
+const modules = PERMISSION_MODULES
+
+const legacyModuleAliases: Record<string, string> = {
+  'project-structure': 'structure',
+  'subcontractor-contracts': 'breakdown',
+  'subcontractor-invoices': 'certificates',
+  'material-requests': 'procurement',
+  'assigned-approvals': 'approval-center',
+  'reports': 'dashboard',
+}
 
 const fallbackUsers: DbUser[] = [
   { id: 'admin-owner', name: 'Admin / Owner', role: 'Full access override', admin: true, projects: ['All Project Areas', '200 FEDDAN'] },
@@ -69,15 +97,15 @@ function defaultsForUser(user: DbUser): PermissionsByModule {
   const role = String(user.role ?? '').toLowerCase()
   if (isAdmin) return base
   if (role.includes('finance')) {
-    for (const key of ['finance','subcontractor-invoices','assigned-approvals','reports']) base[key] = { ...makeRow(false), View: true, Edit: true, Approve: true, Export: true }
+    for (const key of ['finance','payment-requests','certificates','approval-center','dashboard']) base[key] = { ...makeRow(false), View: true, Edit: true, Approve: true, Export: true }
     return base
   }
   if (role.includes('qs')) {
-    for (const key of ['project-structure','boq','bbs-qs','subcontractor-contracts','subcontractor-invoices','material-requests','assigned-approvals','reports']) base[key] = { ...makeRow(false), View: true, Create: ['bbs-qs','subcontractor-invoices','material-requests'].includes(key), Edit: ['bbs-qs','subcontractor-invoices','material-requests'].includes(key), Export: ['boq','bbs-qs','reports'].includes(key), Approve: key === 'assigned-approvals' }
+    for (const key of ['structure','boq','bbs-qs','breakdown','certificates','procurement','approval-center','dashboard']) base[key] = { ...makeRow(false), View: true, Create: ['bbs-qs','certificates','procurement'].includes(key), Edit: ['bbs-qs','certificates','procurement'].includes(key), Export: ['boq','bbs-qs','dashboard'].includes(key), Approve: key === 'approval-center' }
     return base
   }
   if (role.includes('ceo')) {
-    for (const key of modules.map(m => m.key)) base[key] = { ...makeRow(false), View: true, Approve: ['assigned-approvals','finance','procurement','subcontractor-invoices'].includes(key), Export: true }
+    for (const key of modules.map(m => m.key)) base[key] = { ...makeRow(false), View: true, Approve: ['approval-center','finance','procurement','certificates'].includes(key), Export: true }
     return base
   }
   for (const key of modules.map(m => m.key)) base[key] = { ...makeRow(false), View: true }
@@ -88,7 +116,8 @@ function fromDbRows(user: DbUser, rows: any[]): PermissionsByModule {
   const next = defaultsForUser(user)
   for (const row of rows ?? []) {
     if (!row?.module_key) continue
-    next[row.module_key] = {
+    const moduleKey = legacyModuleAliases[String(row.module_key)] ?? String(row.module_key)
+    next[moduleKey] = {
       View: Boolean(row.can_view),
       Create: Boolean(row.can_create),
       Edit: Boolean(row.can_edit),

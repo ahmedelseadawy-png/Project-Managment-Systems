@@ -10,11 +10,13 @@ import { createClient } from '@/lib/supabase/client'
 
 export interface ModulePermission {
   module_key: string
+  project_id?: string | null
   can_view: boolean
   can_create: boolean
   can_edit: boolean
   can_delete: boolean
   can_approve: boolean
+  can_export?: boolean
 }
 
 interface UseUserPermissionsResult {
@@ -33,6 +35,18 @@ export function useUserPermissions(
   const [permissions, setPermissions] = useState<ModulePermission[]>([])
   const [tableExists, setTableExists] = useState<boolean | null>(null)
   const [loading, setLoading] = useState(true)
+
+  const normalizeModuleKey = useCallback((moduleKey: string): string => {
+    const aliases: Record<string, string> = {
+      'project-structure': 'structure',
+      'subcontractor-contracts': 'breakdown',
+      'subcontractor-invoices': 'certificates',
+      'material-requests': 'procurement',
+      'assigned-approvals': 'approval-center',
+      'reports': 'dashboard',
+    }
+    return aliases[moduleKey] ?? moduleKey
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -80,7 +94,7 @@ export function useUserPermissions(
         // 2. Try to load user_module_permissions (may not exist yet)
         const { data: perms, error } = await supabase
           .from('user_module_permissions')
-          .select('module_key, can_view, can_create, can_edit, can_delete, can_approve')
+          .select('project_id, module_key, can_view, can_create, can_edit, can_delete, can_approve, can_export')
           .eq('user_id', userId ?? '')
           .eq('is_active', true)
           .or(projectId ? `project_id.eq.${projectId},project_id.is.null` : 'project_id.is.null')
@@ -93,16 +107,25 @@ export function useUserPermissions(
           setPermissions([])
         } else {
           setTableExists(true)
-          setPermissions(
-            (perms ?? []).map((p: any) => ({
-              module_key: p.module_key,
+          const merged = new Map<string, ModulePermission>()
+          for (const p of perms ?? []) {
+            const key = normalizeModuleKey(String(p.module_key ?? ''))
+            if (!key) continue
+            const existing = merged.get(key)
+            const isProjectSpecific = Boolean(p.project_id)
+            if (existing?.project_id && !isProjectSpecific) continue
+            merged.set(key, {
+              project_id: p.project_id ?? null,
+              module_key: key,
               can_view: Boolean(p.can_view),
               can_create: Boolean(p.can_create),
               can_edit: Boolean(p.can_edit),
               can_delete: Boolean(p.can_delete),
               can_approve: Boolean(p.can_approve),
-            }))
-          )
+              can_export: Boolean(p.can_export),
+            })
+          }
+          setPermissions(Array.from(merged.values()))
         }
       } catch {
         if (!cancelled) {
@@ -116,7 +139,7 @@ export function useUserPermissions(
 
     load()
     return () => { cancelled = true }
-  }, [userId, userEmail, projectId])
+  }, [userId, userEmail, projectId, normalizeModuleKey])
 
   const canView = useCallback(
     (moduleKey: string): boolean => {
@@ -128,11 +151,12 @@ export function useUserPermissions(
       // (conservative: until admin configures permissions, show everything)
       if (permissions.length === 0) return true
       // Check specific permission
-      const perm = permissions.find((p) => p.module_key === moduleKey)
-      if (!perm) return true // no restriction configured for this module
+      const normalized = normalizeModuleKey(moduleKey)
+      const perm = permissions.find((p) => p.module_key === normalized)
+      if (!perm) return false
       return perm.can_view
     },
-    [isAdminOwner, tableExists, permissions]
+    [isAdminOwner, tableExists, permissions, normalizeModuleKey]
   )
 
   return { isAdminOwner, canView, permissions, loading }
