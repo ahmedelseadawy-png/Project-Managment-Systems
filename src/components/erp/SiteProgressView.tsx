@@ -1,6 +1,7 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { ChangeEvent } from 'react'
 import { createClient } from '@/lib/supabase/client'
 
 type WorkfrontRow = {
@@ -57,16 +58,57 @@ type Props = {
   isAdminOwner?: boolean
 }
 
+type ExcelRow = Record<string, unknown>
+
+type SiteProgressInsert = {
+  project_id: string
+  subcontractor_id: string | null
+  contract_id: string | null
+  contract_item_id: string
+  boq_item_id: string | null
+  breakdown_id: string | null
+  villa_no: string | null
+  building_no: string | null
+  trade: string | null
+  progress_percent: number
+  progress_date: string
+  notes: string | null
+  status: string
+  submitted_by: string | null
+  submitted_at: string
+  approved_by: string | null
+  approved_at: string | null
+  created_by: string | null
+}
+
 const today = () => new Date().toISOString().slice(0, 10)
 const text = (value: unknown) => String(value ?? '').trim()
 const pct = (value: unknown) => `${Number(value ?? 0).toFixed(1)}%`
 const keyFromParts = (parts: Array<string | null | undefined>) => parts.map((part) => text(part) || '-').join('|')
+const excelKey = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '')
+const excelPick = (row: ExcelRow, names: string[]) => {
+  const wanted = names.map(excelKey)
+  const found = Object.entries(row).find(([key]) => wanted.includes(excelKey(key)))
+  return found?.[1]
+}
+const excelPercent = (value: unknown) => {
+  const raw = text(value).replace('%', '')
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(100, parsed)) : null
+}
+const excelDate = (value: unknown) => {
+  const raw = text(value)
+  if (!raw) return today()
+  const parsed = new Date(raw)
+  return Number.isNaN(parsed.getTime()) ? raw.slice(0, 10) : parsed.toISOString().slice(0, 10)
+}
 
 const card = { background: '#fff', border: '1px solid #e1e8e5', borderRadius: 12, padding: 14 } as const
 const input = { width: '100%', padding: '8px 10px', border: '1px solid #d9e2df', borderRadius: 8, fontSize: 13, background: '#fff' } as const
 const button = { borderRadius: 8, border: '1px solid transparent', padding: '9px 12px', fontSize: 13, fontWeight: 800, cursor: 'pointer' } as const
 
 export function SiteProgressView({ projectId, userId, isAdminOwner = false }: Props) {
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [workfronts, setWorkfronts] = useState<WorkfrontRow[]>([])
   const [items, setItems] = useState<ContractItem[]>([])
   const [updates, setUpdates] = useState<ProgressUpdate[]>([])
@@ -136,10 +178,12 @@ export function SiteProgressView({ projectId, userId, isAdminOwner = false }: Pr
     return map
   }, [items, workfronts])
 
-  const getWorkfrontItems = (wf: WorkfrontRow) => {
+  const getWorkfrontItems = useCallback((wf: WorkfrontRow) => {
     const wfBuilding = text(wf.villa_id || wf.building_id || wf.villa_no || wf.building_no)
     return itemsByWorkfront.get(keyFromParts([wf.project_id, wf.subcontractor_id, wf.contract_id, wf.trade, wfBuilding])) ?? []
-  }
+  }, [itemsByWorkfront])
+
+  const latestProgressForItems = (wfItems: ContractItem[]) => updates.find((update) => wfItems.some((item) => item.id === update.contract_item_id))
 
   const subcontractors = useMemo(() => Array.from(new Map(workfronts.map((wf) => [text(wf.subcontractor_id || wf.subcontractor_code), `${wf.subcontractor_code ?? 'SC'} - ${wf.subcontractor_name ?? 'Subcontractor'}`])).entries()).filter(([id]) => id), [workfronts])
   const trades = useMemo(() => Array.from(new Set(workfronts.map((wf) => text(wf.trade || 'General')).filter(Boolean))).sort(), [workfronts])
@@ -157,7 +201,7 @@ export function SiteProgressView({ projectId, userId, isAdminOwner = false }: Pr
         && (contractFilter === 'all' || text(wf.contract_id) === contractFilter)
         && (statusFilter === 'all' || text(wf.health_status) === statusFilter)
     })
-  }, [workfronts, search, subcontractorFilter, tradeFilter, contractFilter, statusFilter, itemsByWorkfront])
+  }, [workfronts, search, subcontractorFilter, tradeFilter, contractFilter, statusFilter, getWorkfrontItems])
 
   const openModal = (wf: WorkfrontRow) => {
     setSelected(wf)
@@ -238,6 +282,168 @@ export function SiteProgressView({ projectId, userId, isAdminOwner = false }: Pr
     }
   }
 
+  const buildPayloadForWorkfront = (wf: WorkfrontRow, wfItems: ContractItem[], percent: number, date: string, status: string, rowNotes: string | null): SiteProgressInsert[] => {
+    const nowIso = new Date().toISOString()
+    return wfItems.map((item) => ({
+      project_id: projectId ?? text(wf.project_id),
+      subcontractor_id: wf.subcontractor_id,
+      contract_id: wf.contract_id,
+      contract_item_id: item.id,
+      boq_item_id: item.boq_item_id ?? null,
+      breakdown_id: item.breakdown_item_id ?? null,
+      villa_no: wf.villa_no ?? item.villa_no ?? null,
+      building_no: wf.building_no ?? item.building_no ?? null,
+      trade: wf.trade ?? item.trade ?? null,
+      progress_percent: percent,
+      progress_date: date,
+      notes: rowNotes,
+      status,
+      submitted_by: userId ?? null,
+      submitted_at: nowIso,
+      approved_by: status === 'approved' ? (userId ?? null) : null,
+      approved_at: status === 'approved' ? nowIso : null,
+      created_by: userId ?? null,
+    }))
+  }
+
+  const exportSiteProgressExcel = async () => {
+    const XLSX = await import('xlsx')
+    const rows = filtered.map((wf) => {
+      const wfItems = getWorkfrontItems(wf)
+      const latest = latestProgressForItems(wfItems)
+      return {
+        subcontractor_code: wf.subcontractor_code ?? '',
+        subcontractor_name: wf.subcontractor_name ?? '',
+        subcontractor_id: wf.subcontractor_id ?? '',
+        villa_or_node: wf.villa_no || wf.building_no || 'Unassigned',
+        villa_no: wf.villa_no ?? '',
+        building_no: wf.building_no ?? '',
+        trade: wf.trade ?? 'General',
+        contract_id: wf.contract_id ?? '',
+        contract_item_ids: wfItems.map((item) => item.id).join(', '),
+        boq_items: wfItems.map((item) => text(item.item_code || item.item_description || item.description)).filter(Boolean).join(', '),
+        contract_types: Array.from(new Set(wfItems.map((item) => text(item.contract_type || 'boq')).filter(Boolean))).join(', '),
+        planned_start: wf.planned_start_date ?? '',
+        planned_finish: wf.planned_finish_date ?? '',
+        current_site_progress_percent: Number(wf.site_progress_percent ?? 0),
+        certified_progress_percent: Number(wf.certified_progress_percent ?? 0),
+        last_progress_date: latest?.progress_date ?? '',
+        latest_status: latest?.status ?? '',
+        warning: wf.progress_warning ?? '',
+        import_progress_percent: '',
+        import_progress_date: today(),
+        import_status: isAdminOwner ? 'approved' : 'pending',
+        import_notes: '',
+      }
+    })
+    const wb = XLSX.utils.book_new()
+    const ws = XLSX.utils.json_to_sheet(rows)
+    XLSX.utils.book_append_sheet(wb, ws, 'Site Progress')
+    XLSX.writeFile(wb, `site-progress-${today()}.xlsx`)
+  }
+
+  const downloadImportTemplate = async () => {
+    const XLSX = await import('xlsx')
+    const rows = filtered.slice(0, 200).map((wf) => {
+      const wfItems = getWorkfrontItems(wf)
+      return {
+        subcontractor_code: wf.subcontractor_code ?? '',
+        villa_or_node: wf.villa_no || wf.building_no || 'Unassigned',
+        trade: wf.trade ?? 'General',
+        contract_id: wf.contract_id ?? '',
+        contract_item_id: wfItems[0]?.id ?? '',
+        progress_percent: '',
+        progress_date: today(),
+        status: isAdminOwner ? 'approved' : 'pending',
+        notes: '',
+      }
+    })
+    const wb = XLSX.utils.book_new()
+    const ws = XLSX.utils.json_to_sheet(rows.length > 0 ? rows : [{
+      subcontractor_code: '',
+      villa_or_node: '',
+      trade: '',
+      contract_id: '',
+      contract_item_id: '',
+      progress_percent: '',
+      progress_date: today(),
+      status: isAdminOwner ? 'approved' : 'pending',
+      notes: '',
+    }])
+    XLSX.utils.book_append_sheet(wb, ws, 'Import Template')
+    XLSX.writeFile(wb, `site-progress-import-template-${today()}.xlsx`)
+  }
+
+  const findWorkfrontFromExcel = (row: ExcelRow) => {
+    const contractItemId = text(excelPick(row, ['contract_item_id', 'contract item id', 'contract item']))
+    if (contractItemId) {
+      return workfronts.find((wf) => getWorkfrontItems(wf).some((item) => item.id === contractItemId)) ?? null
+    }
+    const subcontractorCode = text(excelPick(row, ['subcontractor_code', 'subcontractor code', 'subcontractor'])).toLowerCase()
+    const villaNode = text(excelPick(row, ['villa_or_node', 'villa node', 'villa', 'villa_no', 'building_no', 'node'])).toLowerCase()
+    const trade = text(excelPick(row, ['trade', 'discipline'])).toLowerCase()
+    const contractId = text(excelPick(row, ['contract_id', 'contract id', 'contract'])).toLowerCase()
+    return workfronts.find((wf) => {
+      const wfVilla = text(wf.villa_no || wf.building_no || 'Unassigned').toLowerCase()
+      return (!subcontractorCode || text(wf.subcontractor_code || wf.subcontractor_id).toLowerCase() === subcontractorCode)
+        && (!villaNode || wfVilla === villaNode)
+        && (!trade || text(wf.trade || 'General').toLowerCase() === trade)
+        && (!contractId || text(wf.contract_id).toLowerCase().startsWith(contractId))
+    }) ?? null
+  }
+
+  const importSiteProgressExcel = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file || !projectId) return
+    setSaving(true)
+    setMessage('')
+    try {
+      const XLSX = await import('xlsx')
+      const buffer = await file.arrayBuffer()
+      const wb = XLSX.read(buffer, { type: 'array', cellDates: true })
+      const sheet = wb.Sheets[wb.SheetNames[0]]
+      const rows = XLSX.utils.sheet_to_json<ExcelRow>(sheet, { defval: '', raw: false })
+      const payload: SiteProgressInsert[] = []
+      let skipped = 0
+
+      rows.forEach((row) => {
+        const percent = excelPercent(excelPick(row, ['progress_percent', 'progress %', 'progress', 'site progress', 'import_progress_percent']))
+        const wf = findWorkfrontFromExcel(row)
+        if (percent == null || !wf) {
+          skipped += 1
+          return
+        }
+        const contractItemId = text(excelPick(row, ['contract_item_id', 'contract item id', 'contract item']))
+        const wfItems = contractItemId ? getWorkfrontItems(wf).filter((item) => item.id === contractItemId) : getWorkfrontItems(wf)
+        if (wfItems.length === 0) {
+          skipped += 1
+          return
+        }
+        const importedStatus = text(excelPick(row, ['status', 'import_status'])).toLowerCase()
+        const safeStatus = importedStatus === 'approved' && isAdminOwner ? 'approved' : importedStatus === 'rejected' ? 'rejected' : 'pending'
+        const date = excelDate(excelPick(row, ['progress_date', 'progress date', 'date', 'import_progress_date']))
+        const rowNotes = text(excelPick(row, ['notes', 'import_notes'])) || null
+        payload.push(...buildPayloadForWorkfront(wf, wfItems, percent, date, safeStatus, rowNotes))
+      })
+
+      if (payload.length === 0) {
+        setMessage(`No valid site progress rows found. Skipped ${skipped} row(s).`)
+        return
+      }
+
+      const supabase = createClient()
+      const { error } = await supabase.from('site_progress_updates').insert(payload as never[])
+      if (error) throw error
+      setMessage(`Imported ${payload.length} site progress update(s). Skipped ${skipped} row(s).`)
+      await load()
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to import site progress Excel file.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return (
     <div style={{ display: 'grid', gap: 14 }}>
       <div style={{ background: '#113f3a', color: '#fff', borderRadius: 12, padding: 18 }}>
@@ -250,6 +456,18 @@ export function SiteProgressView({ projectId, userId, isAdminOwner = false }: Pr
       {projectId && (
         <>
           {message && <div style={{ ...card, background: '#eef9f4', borderColor: '#cceadf', color: '#0c5c46', fontWeight: 800 }}>{message}</div>}
+          <div style={{ ...card, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', justifyContent: 'space-between' }}>
+            <div>
+              <div style={{ fontWeight: 900 }}>Excel Import / Export</div>
+              <div style={{ color: '#667085', fontSize: 12 }}>Export the current filtered workfronts or import physical progress updates.</div>
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              <button disabled={loading || filtered.length === 0} onClick={exportSiteProgressExcel} style={{ ...button, background: '#fff', borderColor: '#cddbd5', color: '#0f513f' }}>Export Current View</button>
+              <button disabled={loading} onClick={downloadImportTemplate} style={{ ...button, background: '#fff', borderColor: '#cddbd5', color: '#0f513f' }}>Download Import Template</button>
+              <button disabled={saving || loading} onClick={() => fileInputRef.current?.click()} style={{ ...button, background: '#0f6e56', color: '#fff', opacity: saving || loading ? 0.65 : 1 }}>Import Excel</button>
+              <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" onChange={importSiteProgressExcel} style={{ display: 'none' }} />
+            </div>
+          </div>
           <div style={{ ...card, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10 }}>
             <label><Small>Project</Small><input style={input} value="Current Project" disabled /></label>
             <label><Small>Search</Small><input style={input} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Villa, BOQ item, subcontractor" /></label>
@@ -279,7 +497,7 @@ export function SiteProgressView({ projectId, userId, isAdminOwner = false }: Pr
                         <td style={td}>{wf.planned_start_date ?? '-'}</td>
                         <td style={td}>{wf.planned_finish_date ?? '-'}</td>
                         <td style={td}>{pct(wf.site_progress_percent)}</td>
-                        <td style={td}>{updates.find((update) => wfItems.some((item) => item.id === update.contract_item_id))?.progress_date ?? '-'}</td>
+                        <td style={td}>{latestProgressForItems(wfItems)?.progress_date ?? '-'}</td>
                         <td style={td}>{wf.progress_warning ? <span style={{ color: '#8a4b00', fontWeight: 800 }}>{wf.progress_warning}</span> : '-'}</td>
                         <td style={td}><button onClick={() => openModal(wf)} style={{ ...button, background: '#0f6e56', color: '#fff' }}>Add / Update Site Progress</button></td>
                       </tr>
